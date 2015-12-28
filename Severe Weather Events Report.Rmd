@@ -1,0 +1,624 @@
+---
+title: "Severe Weather Events. Which are the most dangerous and costly?"
+date: "Oct. 24th, 2015"
+output: html_document
+---
+## Synopsis
+> Present report aims at identifying the severe weather phenomena which have the biggest impact on US population health and result in the greatest economic consequences. The analysis is based on a Storm Data database maintained by  the U.S. National Oceanic and Atmospheric Administration's (NOAA). Due to incomplete representation of NWS's 48 event types across all observed years, the analysis was restricted to years 1993-2011. Results show that among the most dangerous weather phenomena are EXCESSIVE HEAT, TORNADO and HEAT and among the most costy phenomena - FLOOD, DROUGHT and HURRICANE.
+
+## Research questions, definitions and assumptions
+
+The following research questions are addressed ih this report:
+
+1. Across the United States, which types of events (as indicated in the `EVTYPE` variable) are most harmful with respect to population health?
+2. Across the United States, which types of events have the greatest economic consequences?
+
+For the purpose of answering those questions following definitions are used:
+
+1. harmful - causing more than 0 fatality or having more than 0 injured persons
+2. having econimic consequences - having caused any damages valued in amount of money (USD) greater than 0
+3. most/greatest - contributing to 80% of the overall personal or material damages recorded in the analysed database.
+
+It is further assumed (but not verified), that the inflation has no substantial influence on the present analysis, therefore no correction for it is applied.
+
+## Data Processing
+
+### Obtaining and reading data
+
+The [Storm Data](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2) database for the analysis is obtained from the provided URL (as bz2-compressed csv archive) and read using read.csv funtion.
+
+```{r, cache=TRUE}
+url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+destfile <- "Storm Data.csv.bz2"
+if(!file.exists(destfile))
+    download.file(url, destfile, method = "curl")
+sd <- read.csv(destfile, stringsAsFactors = F)
+```
+
+National Weather Service Instruction 10-1605 from Aug. 17th, 2007 is used to identify variables of interest for the present analysis and to interpret their content.
+
+```{r, cache=TRUE}
+dim(sd)
+```
+
+The database contains 902,297 observations of 37 variables. Following variables are observed:
+
+```{r}
+names(sd)
+```
+
+For the purpose of this analysis we are interested in the following variables:
+
+- EVTYPE - storm event type
+- BGN_DATE - beginning date of an observation
+- FATALITIES - number of fatalities
+- INJURIES - number of injured persons
+- PROPDMG - significant of the monetary property damages
+- PROPDMGEXP - exponent of the monetary property damages
+- CROPDMG - significant of the monetary crop damages
+- CROPDMGEXP - exponent of the monetary crop damages
+- REMARKS - narrative of the event
+
+Before proceeding with further analysis we load the packages we'll be using.
+```{r, message=FALSE}
+library(lubridate)
+library(dplyr)
+library(stringdist)
+library(ggplot2)
+library(gridExtra)
+```
+
+According to [NOAA information](http://www.ncdc.noaa.gov/stormevents/details.jsp) not all types or events were recorded over the observation time span (from 1950 till end of 2011). We verify this information analysing the data itself.
+
+We select only needed variables for further analysis and convert BGN_DATE to Date type:
+
+```{r, cache=TRUE}
+sd <- select(sd, EVTYPE, BGN_DATE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP, REMARKS)
+sd$BGN_DATE <- as.Date(sd$BGN_DATE, "%m/%d/%Y %T")
+```
+
+Now we check how many unique events (and possibly which ones) were recorded in the following time frames:
+
+- before 1954
+- 1955 - 1992
+- 1993 - 1995
+- from 1996 onwards
+
+```{r, cache=TRUE}
+length(unique(sd$EVTYPE[year(sd$BGN_DATE) <= 1954]))
+unique(sd$EVTYPE[year(sd$BGN_DATE) <= 1954])
+```
+
+Before 1954 only one event type (TORNADO) exists in the database (confirmed).
+
+```{r, cache=TRUE}
+length(unique(sd$EVTYPE[year(sd$BGN_DATE) > 1954 & year(sd$BGN_DATE) <= 1992]))
+unique(sd$EVTYPE[year(sd$BGN_DATE) > 1954 & year(sd$BGN_DATE) <= 1992])
+```
+
+Between 1955 and 1992 three event types (TORNADO, TSTM WIND and HAIL) exist in the database (confirmed).
+
+```{r, cache=TRUE}
+length(unique(sd$EVTYPE[year(sd$BGN_DATE) > 1992 & year(sd$BGN_DATE) <= 1995]))
+```
+
+Between 1993 and 1995 there are 598 unique entries as event types in the database. [NOAA information](http://www.ncdc.noaa.gov/stormevents/details.jsp) states however that only Tornado, Thunderstorm Wind and Hail are available for this period (discrepancy).
+
+```{r, cache=TRUE}
+length(unique(sd$EVTYPE[year(sd$BGN_DATE) > 1995]))
+```
+
+From 1996 onwards there are 516 unique event types recorded in the database. [NOAA](http://www.ncdc.noaa.gov/stormevents/details.jsp) states, that only 48 event types are being recorded from that year (discrepancy).
+
+### General analysis overview
+
+The database is analyzed with the aim to identify event types contributing, separately, to 80% of overall impact on population health, measured in number of fatalities and/or injuries, and to 80% of overall recorded material damages. The scope or meaning of 'overall' in this context is also determined in the course of the analysis. In particular, it seems that including the whole time span of the database could bias the results with respect to the four event types recorded until 1992. The possibility of bias is assessed grpahically.
+
+If the assessment indicates possible bias, the data for further analysis will be taken from 1993-2011 period. (Years 1993-1995 are included as there is far more event types recorded than stated in NOAA information and these need to be analyzed.)
+
+Additionally, based on the comparision of magnitudes of fatalities vs. injuries and property vs. crop damages a decision is taken if those pairs will be analyzed and reported jointly or separately in answers to their respective questions.
+
+Due to large discrepancy between officially reported 48 event types and actually reported in the database, some clean-up effort is needed. In order to focus only on event types of interest (those that are harmful and/or having economic consequences), first the damages are reviewed, cleaned up and recalculated in monetary units (USD) and then event types are worked upon.
+
+Finally event types contributing separately to 80% of the overall fatalities, injuries, property and crop damages are identyfied, possibly joined pairwise, and reported.
+
+### Property and Crop Damages Processing
+
+#### PROPDMGEXP exponent cleanup
+
+##### Analysis
+
+```{r, cache=TRUE}
+sd$PROPDMGEXP <- toupper(sd$PROPDMGEXP)
+exp <- unique(sd$PROPDMGEXP)
+exp <- exp[order(exp)]
+# What is the time-wise presence of different exponents?
+sapply(exp, function(x) range(year(sd$BGN_DATE[sd$PROPDMGEXP == x])))
+# How many observations are for each exponent?
+sapply(exp, function(x) sum(sd$PROPDMGEXP == x))
+# How many observations with non-zero PROPDMG are for each exponent?
+sapply(exp, function(x) sum(sd$PROPDMGEXP == x & sd$PROPDMG != 0))
+# What is the "raw" sum of PROPDMG for each exponen?
+sapply(exp, function(x) sum(sd$PROPDMG[sd$PROPDMGEXP == x]))
+```
+
+Based on the above information, the approach to PROPDMGEXP clean-up is the following:
+
+- H, K, M, B are applied accordingly (10e2/10e3/10e6/10e9)
+- exponents are ignored if there are no non-zero PROPDMG entries for them (i.e. ?, 1, 8)
+- for exponents +, - the clues are sought in REMARKS (13 event types). If no clues are found, exponent of 0 is assumed.
+- for remaining numeric exponents the clues are sought in REMARKS, and if not found they are assumed to be exponents of the base of 10. The overall error/contribution is calculated as to the total of PROPDMG for 2 cases: 1) ignoring PROPDMG values for those exponents, 2) assuming they are base 10 exponents
+- for "" exponent the clues are sought in REMARKS. If no clues are found, exponent of 0 is assumed.
+
+Clues in remarks are strings dollar/USD/$. No translation of descriptive damages to cash according to the NWS instruction is performed due to to much time cost associated. Also, to conserve space, the remarks containing clues are not printed out in this report.
+
+```{r, warning=FALSE, cache=TRUE}
+# Create logical vector of REMARKS containing clues
+dollars <- grepl("dollar?|USD|\\$", sd$REMARKS)
+# Check for clues for the exponents where there is non-zero damage
+invisible(sapply(c("","-","+","0","2","3","4","5","6","7"), 
+                 function(x) sd$REMARKS[dollars & sd$PROPDMGEXP == x & sd$PROPDMG > 0])
+          )
+# ""  - no clues
+# "-" - no clues
+# "+" - no clues
+# "0" - clues, inconcistent. Probable exponents: c(1,6,4,6,6,6,3,3). 201 obsevations with no clues.
+invisible(sd$PROPDMG[dollars & sd$PROPDMGEXP == "0" & sd$PROPDMG > 0]
+         )
+# "2" - no clues
+# "3" - no clues
+# "4" - no clues
+# "5" - clues, inconsistent. Probable exponents: c(5,6,3,4). Second item should have PROPDMG
+# value of 18 instead of 30. 14 obs. with no clues
+invisible(sd$PROPDMG[dollars & sd$PROPDMGEXP == "5" & sd$PROPDMG > 0]
+         )
+# "6" - no clues
+# "7" - no clues
+```
+
+##### Cleanup process
+
+```{r, cache=TRUE}
+# Correct significand based on the clue
+sd$PROPDMG[dollars & sd$PROPDMGEXP == "5" & sd$PROPDMG > 0][2] <- 18
+# Correct exponents based on clues found in REMARKS
+sd$PROPDMGEXP[dollars & sd$PROPDMGEXP == "0" & sd$PROPDMG > 0] <- c(1,6,4,6,6,6,3,3)
+sd$PROPDMGEXP[dollars & sd$PROPDMGEXP == "5" & sd$PROPDMG > 0] <- c(5,6,3,4)
+# Create new variable holding total monetaty damages for properties
+sd <- mutate(sd, proptot = 0)
+sd$proptot[sd$PROPDMGEXP == "H"] <- sd$PROPDMG[sd$PROPDMGEXP == "H"] * 100
+sd$proptot[sd$PROPDMGEXP == "K"] <- sd$PROPDMG[sd$PROPDMGEXP == "K"] * 10**3
+sd$proptot[sd$PROPDMGEXP == "M"] <- sd$PROPDMG[sd$PROPDMGEXP == "M"] * 10**6
+sd$proptot[sd$PROPDMGEXP == "B"] <- sd$PROPDMG[sd$PROPDMGEXP == "B"] * 10**9
+sd$proptot[sd$PROPDMGEXP == ""] <- sd$PROPDMG[sd$PROPDMGEXP == ""]
+sd$proptot[sd$PROPDMGEXP == "+"] <- sd$PROPDMG[sd$PROPDMGEXP == "+"]
+sd$proptot[sd$PROPDMGEXP == "-"] <- sd$PROPDMG[sd$PROPDMGEXP == "-"]
+
+for(ex in c("0","2","3","4","5","6","7")) {
+    sd$proptot[sd$PROPDMGEXP == ex] <- sd$PROPDMG[sd$PROPDMGEXP == ex] * 10**as.integer(ex)
+}
+```
+
+##### Evaluation of assumptions with respect to exponents
+
+```{r, cache=TRUE}
+# Total PROP damages are
+gt <- sum(sd$proptot)
+formatC(gt, format = "g")
+# thereof with H/K/M/B exponent:
+lt <- sum(sd$proptot[sd$PROPDMGEXP %in% c("H", "K", "M", "B")])
+formatC(lt, format = "g")
+# so the "interpreted" exponents account for:
+err <- (gt - lt)/gt * 100
+err
+```
+
+So, interpreting numeric values in PROPDMGEXP as exponents of base 10 versus ignoring damages with those unidentified in the documentation exponents would result in error of only `r err` % of total property damages. (Note however, that it is possible that they contribute more significantly to some individual event types than to the total.)
+
+#### CROPDMGEXP exponent cleanup
+
+##### Analysis
+
+```{r, cache=TRUE}
+sd$CROPDMGEXP <- toupper(sd$CROPDMGEXP)
+cexp <- unique(sd$CROPDMGEXP)
+cexp <- cexp[order(cexp)]
+# What is the time-wise presence of different exponents?
+sapply(cexp, function(x) range(year(sd$BGN_DATE[sd$CROPDMGEXP == x])))
+# How many observations are for each exponent?
+sapply(cexp, function(x) sum(sd$CROPDMGEXP == x))
+# How many observations with non-zero CROPDMG are for each exponent?
+sapply(cexp, function(x) sum(sd$CROPDMGEXP == x & sd$CROPDMG != 0))
+# What is the "raw" sum of CROPDMG for each exponen?
+sapply(cexp, function(x) sum(sd$CROPDMG[sd$CROPDMGEXP == x]))
+```
+
+Based on the above information, the approach to CROPDMGEXP clean-up is the same as for clean-up of PROPDMGEXP.
+
+```{r, cache=TRUE}
+# CLues verification
+invisible(sapply(c("","0"), function(x) sd$REMARKS[dollars & sd$CROPDMGEXP == x & sd$CROPDMG > 0])
+          )
+# "" - no clues
+# "0" - no clues
+```
+
+##### Cleanup process
+
+```{r, cache=TRUE}
+sd <- mutate(sd, croptot = 0)
+sd$croptot[sd$CROPDMGEXP == "K"] <- sd$CROPDMG[sd$CROPDMGEXP == "K"] * 10**3
+sd$croptot[sd$CROPDMGEXP == "M"] <- sd$CROPDMG[sd$CROPDMGEXP == "M"] * 10**6
+sd$croptot[sd$CROPDMGEXP == "B"] <- sd$CROPDMG[sd$CROPDMGEXP == "B"] * 10**9
+sd$croptot[sd$CROPDMGEXP == ""] <- sd$CROPDMG[sd$CROPDMGEXP == ""]
+sd$croptot[sd$CROPDMGEXP == "0"] <- sd$CROPDMG[sd$CROPDMGEXP == "0"]
+```
+
+### FATALITIES and INJURIES Processing
+
+#### FATALITIES variable investigation
+
+```{r, cache=TRUE}
+summary(sd$FATALITIES)
+sum(sd$FATALITIES)      # Total number of fatalities
+sum(sd$FATALITIES > 0)  # Total number of entries with fatalities greater than 0
+```
+
+FATALITIES variable is clean.
+
+#### INJURIES variable investigation
+
+```{r, cache=TRUE}
+summary(sd$INJURIES)
+sum(sd$INJURIES)     # Total number of injuries
+sum(sd$INJURIES > 0) # Number of entries with injuries greater than 0
+```
+
+INJURIES variable is clean.
+
+### Variables of interest in time domain
+
+Analyzing graphically variables of interest in time domain (Fig. 1) two conclusions can be drawn:
+
+1. Both pairs of variables (i.e. FATALITES - INJURIES and proptot - croptot) have different orders of magnitude, so each variable in the pair should be addressed separately when answering the research questions
+2. The distribution of the data in time suggests that including period 1950-1992 in the analysis can induce observable bias on the results concerning health impacts, however it shouldn't have too big impact on results concerning economic consequences. For the consistency of analysis, however, the same period should be selected when answering both questions.
+
+```{r, cache=TRUE}
+f <- sd %>% group_by(year = year(BGN_DATE)) %>% summarise(yftotal = sum(FATALITIES))
+
+plt1 <- qplot(year, yftotal, data = f, geom = "line", color = "darkred") + 
+    xlab("") +
+    ylab("Fatalities") +
+    theme(legend.position="none")+ggtitle("Fatalities")
+
+i <- sd %>% group_by(year = year(BGN_DATE)) %>% summarise(yitotal = sum(INJURIES))
+
+plt2 <- qplot(year, yitotal, data = i, geom = "line", color = "darkred") + 
+    xlab("") +
+    ylab("Injuries") +
+    theme(legend.position="none")+ggtitle("Injuries")
+
+p <- sd %>% group_by(year = year(BGN_DATE)) %>% summarise(yproptot = sum(proptot))
+
+plt3 <- qplot(year, yproptot/10^9, data = p, geom = "line", color = "darkred") + 
+    xlab("Year") +
+    ylab("B USD") +
+    theme(legend.position="none")+ggtitle("Property Damage")
+
+c <- sd %>% group_by(year = year(BGN_DATE)) %>% summarise(ycroptot = sum(croptot))
+
+plt4 <- qplot(year, ycroptot/10^9, data = c, geom = "line", color = "darkred") + 
+    xlab("Year") +
+    ylab("B USD") +
+    theme(legend.position="none")+ggtitle("Crop Damage")
+
+grid.arrange(plt1, plt2, plt3, plt4, ncol = 2, top="Fig. 1. Variables of interest vs. time")
+
+```
+
+### Identification of the event types in context of the research questions
+
+First we assure that EVTYPE entries are all upper case, without any leading or trailing spaces and we correct the obvious misspelling of TSTM: 
+
+```{r, cache=TRUE}
+sd <- mutate(sd, toupper(gsub("^\\s+|\\s+$", "", sd$EVTYPE)))
+sd$EVTYPE <- gsub("TSTM", "THUNDERSTORM", sd$EVTYPE)
+```
+
+Now we proceed to identification of events providing answers to the research questions in accordance to the strategy described earlier.
+
+For every variable of interest after identifying those contributing to up to 80% of damages/fatalities/injuries, we addjust number of event types considered for further analysis in order to be as close to 80%, eiter just above or just below.
+
+Event types contributing to the 80% of fatalities:
+
+```{r, cache=TRUE}
+# Restrict the analysis to years 1993-2011
+sd <- sd %>% filter(year(BGN_DATE) >= 1993)
+
+impacts <- sd %>% 
+    group_by(EVTYPE) %>%
+    summarise_each(funs(sum), FATALITIES, INJURIES, proptot, croptot) %>%
+    filter(FATALITIES > 0 | INJURIES > 0 | proptot > 0 | croptot > 0)
+
+dim(impacts) # nrows -> number of indivitual event types contributing to variables of interest
+
+impacts <- arrange(impacts, desc(FATALITIES))
+fatal80_3 <- .8 * sum(impacts$FATALITIES)
+fatalcumsum3 <- cumsum(impacts$FATALITIES)
+topfatidx3 <- which(fatalcumsum3 <= fatal80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+faterror31 <- abs(80 - fatalcumsum3[max(topfatidx3)]/sum(impacts$FATALITIES) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+faterror32 <- abs(80 - fatalcumsum3[max(topfatidx3) + 1]/sum(impacts$FATALITIES) * 100)
+topfatevents3 <- impacts$EVTYPE[1:(max(topfatidx3) + ifelse(faterror31 > faterror32, 1, 0))]
+topfatscores3 <- impacts$FATALITIES[1:(max(topfatidx3) + ifelse(faterror31 > faterror32, 1, 0))]
+topfatevents3
+```
+
+Event types contributing to the 80% of injuries:
+
+```{r, cache=TRUE}
+impacts <- arrange(impacts, desc(INJURIES))
+injury80_3 <- .8 * sum(impacts$INJURIES)
+injurycumsum3 <- cumsum(impacts$INJURIES)
+topinjidx3 <- which(injurycumsum3 <= injury80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+injerror31 <- abs(80 - injurycumsum3[max(topinjidx3)]/sum(impacts$injuries) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+injerror32 <- abs(80 - injurycumsum3[max(topinjidx3) + 1]/sum(impacts$injuries) * 100)
+#
+topinjevents3 <- impacts$EVTYPE[1:(max(topinjidx3) + ifelse(injerror31 > injerror32, 1, 0))]
+topinjscores3 <- impacts$INJURIES[1:(max(topinjidx3) + ifelse(injerror31 > injerror32, 1, 0))]
+topinjevents3
+```
+
+Event types contributing to the 80% of property damages:
+
+```{r, cache=TRUE}
+# Find events accounting for 80% of prop damages
+impacts <- arrange(impacts, desc(proptot))
+prop80_3 <- .8 * sum(impacts$proptot)  # 3.42613e+11
+propcumsum3 <- cumsum(impacts$proptot)
+toppropidx3 <- which(propcumsum3 <= prop80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+properror31 <- abs(80 - propcumsum3[max(toppropidx3)]/sum(impacts$proptot) * 100) # 2.06136
+# Absolute difference error for the cutoff just below 80% is:
+properror32 <- abs(80 - propcumsum3[max(toppropidx3) + 1]/sum(impacts$proptot) * 100) # 2.367224
+toppropevents3 <- impacts$EVTYPE[1:(max(toppropidx3) + ifelse(properror31 > properror32, 1, 0))]
+toppropscores3 <- impacts$proptot[toppropidx3]
+toppropevents3
+```
+
+Event types contributing to the 80% of crop damages:
+
+```{r, cache=TRUE}
+# Find events accounting for 80% of crop damages
+impacts <- arrange(impacts, desc(croptot))
+crop80_3 <- .8 * sum(impacts$croptot) # 39283353537
+cropcumsum3 <- cumsum(impacts$croptot)
+topcropidx3 <- which(cropcumsum3 <= crop80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+croperror31 <- abs(80 - cropcumsum3[max(topcropidx3)]/sum(impacts$croptot) * 100) # 1.773911
+# Absolute difference error for the cutoff just below 80% is:
+croperror32 <- abs(80 - cropcumsum3[max(topcropidx3) + 1]/sum(impacts$croptot) * 100) # 1.346397
+topcropevents3 <- impacts$EVTYPE[1:(max(topcropidx3) + ifelse(croperror31 > croperror32, 1, 0))]
+topcropscores3 <- impacts$croptot[1:(max(topcropidx3) + ifelse(croperror31 > croperror32, 1, 0))]
+topcropevents3
+```
+
+Overall list of event type contributing to 80% of all analyzed impacts (top contributors):
+
+```{r, cache=TRUE}
+topevents <- unique(c(topfatevents3, topinjevents3, toppropevents3, topcropevents3))
+topevents
+```
+
+The official list of event types provided by NWS is the following:
+
+```{r, cache=TRUE}
+propevent <- "Astronomical Low Tide Z Avalanche Z Blizzard Z Coastal Flood Z Cold/Wind Chill Z Debris Flow C Dense Fog Z Dense Smoke Z Drought Z Dust Devil C Dust Storm Z Excessive Heat Z Extreme Cold/Wind Chill Z Flash Flood C Flood C Frost/Freeze Z Funnel Cloud C Freezing Fog Z Hail C Heat Z Heavy Rain C Heavy Snow Z High Surf Z High Wind Z Hurricane (Typhoon) Z Ice Storm Z Lake-Effect Snow Z Lakeshore Flood Z Lightning C Marine Hail M Marine High Wind M Marine Strong Wind M Marine Thunderstorm Wind M Rip Current Z Seiche Z Sleet Z Storm Surge/Tide Z Strong Wind Z Thunderstorm Wind C Tornado C Tropical Depression Z Tropical Storm Z Tsunami Z Volcanic Ash Z Waterspout M Wildfire Z Winter Storm Z Winter Weather Z"
+propevent <- strsplit(propevent, " [ZCM] | Z")
+propevent <- toupper(propevent[[1]])
+propevent
+```
+
+It can be seen that the top contributors list needs clean-up/alignment with the official list.
+
+Before we construct the final top contributor list, we first need to translate the actual list of top contributors to the terms of the official 48 events. This will result in a new, possibly shorter list of top contributing events. This new list will help to clean up the global event types list (database). With the EVTYPEs cleaned up the analysis of top contributors will be re-run. Then we proceed to the Results phase.
+
+To clean up the top contributors list and later the entire EVTYPE variable, string similarities are analyzed using qgram method with parameter `q = 3`. From the matrix of similarities the highest score, but not lower than 0.3, is selected and used to identify the strings pairs for substitution.
+Value of `q = 3` and minimum similarity score of 0.3 were selected empirically as giving reasonably good results.
+
+```{r, cache=TRUE}
+strdst <- sapply(topevents, function(x) stringsim(propevent, x, method = "qgram", q = 3))
+dst <- apply(strdst, 2, max)
+# Positions of the maximum similarities inside 48 official strings vector
+maxsimpos <- apply(strdst, 2, which.max)
+# proper names for those misspelled
+tostridx <- maxsimpos[dst < 1 & dst > .3]
+# and the misspelled themselves
+fromstridx <- which(dst < 1 & dst > .3)
+#
+# Now we modify the top contibuting misspelled events from fromstr to tostr 
+topevents[fromstridx] <- propevent[tostridx]
+topevents <- unique(topevents)
+topevents
+```
+
+This new top contributor list is used as a reference to clean up the EVTYPE variable, in a similarr way as the official list of 48 event types was used to clean up the top contributor list.
+
+The entire process of EVTYPE clean-up is two-step (first topevents, then EVTYPE) in order to avoid unnecesary correction of event types not of interest to us.
+
+```{r, cache=TRUE}
+gstrdst <- sapply(sd$EVTYPE, function(x) stringsim(topevents, x, method = "qgram", q = 3))
+gdst <- apply(gstrdst, 2, max)
+sum(gdst == 1)              # number of exact matches
+sum(gdst < 1 & gdst > 0)    # number of enties misspelled
+# Positions of the maximum similarities inside  strings vector
+gmaxsimpos <- apply(gstrdst, 2, which.max)
+# index into proper names vector for those misspelled
+gtostridx <- gmaxsimpos[gdst < 1 & gdst > .3]
+# index into the misspelled vector
+gfromstridx <- which(gdst < 1 & gdst > .3)
+#
+# Now we need to check if in the list of evtypes identified to correct, there are any ones
+# which match exactly one of the 48 official strings. That would mean they are false positives
+# and need not to be corrected.
+gexactstrdist <- sapply(sd$EVTYPE[gfromstridx], function(x) stringsim(propevent, x, method = "qgram", q = 3))
+gexactdst <- apply(gexactstrdist, 2, max)
+sum(gexactdst == 1) # number of possible false positives, no need to correct
+
+# We need to filter out the indexes for which there is an exact match with official 48 evtypes
+gtostridx <- gtostridx[gexactdst != 1]
+gfromstridx <- gfromstridx[gexactdst != 1]
+
+# Now we modify the top contibuting misspelled events from fromstr to tostr 
+sd$EVTYPE[gfromstridx] <- topevents[gtostridx]
+```
+
+### Re-runing the analysis.
+
+After having cleaned up the EVTYPE variable we re-run the analysis in order to identify the final list of top contributors. Cleaned EVTYPE will contribute to increased precision of the analysis.
+
+Event types contributing to the 80% of fatalities:
+
+```{r, cache=TRUE}
+impacts <- sd %>% 
+    group_by(EVTYPE) %>%
+    summarise_each(funs(sum), FATALITIES, INJURIES, proptot, croptot) %>%
+    filter(FATALITIES > 0 | INJURIES > 0 | proptot > 0 | croptot > 0)
+
+dim(impacts) # new number of individual event types contributing to variables of interest
+
+impacts <- arrange(impacts, desc(FATALITIES))
+fatal80_3 <- .8 * sum(impacts$FATALITIES)
+fatalcumsum3 <- cumsum(impacts$FATALITIES)
+topfatidx3 <- which(fatalcumsum3 <= fatal80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+faterror31 <- abs(80 - fatalcumsum3[max(topfatidx3)]/sum(impacts$FATALITIES) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+faterror32 <- abs(80 - fatalcumsum3[max(topfatidx3) + 1]/sum(impacts$FATALITIES) * 100)
+topfatevents3 <- impacts$EVTYPE[1:(max(topfatidx3) + ifelse(faterror31 > faterror32, 1, 0))]
+topfatscores3 <- impacts$FATALITIES[1:(max(topfatidx3) + ifelse(faterror31 > faterror32, 1, 0))]
+topfatevents3
+```
+
+Event types contributing to the 80% of injuries:
+
+```{r, cache=TRUE}
+impacts <- arrange(impacts, desc(INJURIES))
+injury80_3 <- .8 * sum(impacts$INJURIES)
+injurycumsum3 <- cumsum(impacts$INJURIES)
+topinjidx3 <- which(injurycumsum3 <= injury80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+injerror31 <- abs(80 - injurycumsum3[max(topinjidx3)]/sum(impacts$injuries) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+injerror32 <- abs(80 - injurycumsum3[max(topinjidx3) + 1]/sum(impacts$injuries) * 100)
+#
+topinjevents3 <- impacts$EVTYPE[1:(max(topinjidx3) + ifelse(injerror31 > injerror32, 1, 0))]
+topinjscores3 <- impacts$INJURIES[1:(max(topinjidx3) + ifelse(injerror31 > injerror32, 1, 0))]
+topinjevents3
+```
+
+Event types contributing to the 80% of property damages:
+
+```{r, cache=TRUE}
+# Find events accounting for 80% of prop damages
+impacts <- arrange(impacts, desc(proptot))
+prop80_3 <- .8 * sum(impacts$proptot)
+propcumsum3 <- cumsum(impacts$proptot)
+toppropidx3 <- which(propcumsum3 <= prop80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+properror31 <- abs(80 - propcumsum3[max(toppropidx3)]/sum(impacts$proptot) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+properror32 <- abs(80 - propcumsum3[max(toppropidx3) + 1]/sum(impacts$proptot) * 100)
+toppropevents3 <- impacts$EVTYPE[1:(max(toppropidx3) + ifelse(properror31 > properror32, 1, 0))]
+toppropscores3 <- impacts$proptot[toppropidx3]
+toppropevents3
+```
+
+Event types contributing to the 80% of crop damages:
+
+```{r, cache=TRUE}
+# Find events accounting for 80% of crop damages
+impacts <- arrange(impacts, desc(croptot))
+crop80_3 <- .8 * sum(impacts$croptot)
+cropcumsum3 <- cumsum(impacts$croptot)
+topcropidx3 <- which(cropcumsum3 <= crop80_3)
+# 80% cutoff border verification.
+# Absolute difference error for the cutoff just below 80% is:
+croperror31 <- abs(80 - cropcumsum3[max(topcropidx3)]/sum(impacts$croptot) * 100)
+# Absolute difference error for the cutoff just below 80% is:
+croperror32 <- abs(80 - cropcumsum3[max(topcropidx3) + 1]/sum(impacts$croptot) * 100)
+topcropevents3 <- impacts$EVTYPE[1:(max(topcropidx3) + ifelse(croperror31 > croperror32, 1, 0))]
+topcropscores3 <- impacts$croptot[1:(max(topcropidx3) + ifelse(croperror31 > croperror32, 1, 0))]
+topcropevents3
+```
+
+Overall list of event type contributing to 80% of all analyzed impacts (top contributors):
+
+```{r, cache=TRUE}
+topevents <- unique(c(topfatevents3, topinjevents3, toppropevents3, topcropevents3))
+topevents
+```
+
+## Results
+
+There are `r length(topevents)` event types that account (in subgroups) to around 80% of all fatalities, injuries, property and crop damages.
+
+Across the US the most harmful event types with respect to population health are mainly EXCESSIVE HEAT, TORNADO and HEAT. The complete answer to this research question is shown graphically in Fig. 2.
+
+```{r, cache=TRUE}
+resdf <- data.frame(evtype = topfatevents3, value = topfatscores3, group = "Fatalities")
+resdf <- rbind(resdf, data.frame(evtype = topinjevents3, value = topinjscores3, group = "Injuries"))
+resdf <- rbind(resdf, data.frame(evtype = toppropevents3, value = toppropscores3, group = "Property Damage"))
+resdf <- rbind(resdf, data.frame(evtype = topcropevents3, value = topcropscores3, group = "Crop Damage"))
+
+plot1 <- ggplot(resdf[resdf$group == "Fatalities",], aes(x = reorder(gsub(" ", "\n", evtype), value), y = value))
+plot1 <- plot1 + geom_bar(stat = "identity", fill = "darkred")
+plot1 <- plot1 + labs(y = "Fatalities", title= "Fatalities")
+plot1 <- plot1 + theme(axis.title.y = element_blank())
+plot1 <- plot1 + coord_flip()
+
+plot2 <- ggplot(resdf[resdf$group == "Injuries",], aes(x = reorder(gsub(" ", "\n", evtype), value), y = value))
+plot2 <- plot2 + geom_bar(stat = "identity", fill = "darkorange")
+plot2 <- plot2 + labs(y = "Injuries", title = "Injuries")
+plot2 <- plot2 + theme(axis.title.y = element_blank())
+plot2 <- plot2 + coord_flip()
+
+grid.arrange(plot1, plot2, ncol = 2, top="Fig. 2. Storm event most significant impacts on human health")
+```
+
+Across US event types that have the greatest economic consequences are mainly FLOOD, DROUGHT and HURRICANE. The complete answer to this research question is shown graphically in Fig. 3.
+
+```{r}
+plot3 <- ggplot(resdf[resdf$group == "Property Damage",], aes(x = reorder(gsub(" ", "\n", evtype), value), y = value/10^9))
+plot3 <- plot3 + geom_bar(stat = "identity", fill = "darkblue")
+plot3 <- plot3 + labs(y = "B USD", title = "Property Damage")
+plot3 <- plot3 + theme(axis.title.y = element_blank())
+plot3 <- plot3 + coord_flip()
+
+plot4 <- ggplot(resdf[resdf$group == "Crop Damage",], aes(x = reorder(gsub(" ", "\n", evtype), value), y = order(value/10^9)))
+plot4 <- plot4 + geom_bar(stat = "identity", fill = "darkgreen")
+plot4 <- plot4 + labs(y = "B USD", title = "Crop Damage")
+plot4 <- plot4 + theme(axis.title.y = element_blank())
+plot4 <- plot4 + coord_flip()
+
+grid.arrange(plot3, plot4, ncol = 2, top="Fig. 3. Storm event most significant economic impacts")
+```
+
+## Threats to internal validity
+
+The following threats to internal (construct) validity of this analysis have been identified:
+
+- no correction for inflation
+- possible per-evtype errors due to assumed digits from EXP field
+- possible mismatch between event type recorded in the database and actual event, as described in the event narrative.
+
